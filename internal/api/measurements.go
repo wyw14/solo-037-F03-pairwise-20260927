@@ -7,6 +7,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/wyw14/solo-037/internal/model"
+	"github.com/wyw14/solo-037/internal/permit"
+	"github.com/wyw14/solo-037/internal/probe"
 	"github.com/wyw14/solo-037/internal/service"
 )
 
@@ -16,6 +18,9 @@ type MeasurementService interface {
 	MeasuredRuns() []service.MeasuredRun
 	MeasuredRun(model.RunID) (service.MeasuredRun, bool)
 	AnalyzeMeasuredRun(model.RunID) (service.MeasurementAnalysis, error)
+	RegisterProbeBinding(probe.ChannelBinding) (probe.ChannelBinding, error)
+	ProbeBindings() []probe.ChannelBinding
+	EvaluateMeasuredRun(model.RunID) (permit.Decision, error)
 }
 
 type createMeasuredRunRequest struct {
@@ -84,6 +89,33 @@ func (r *Router) recordMeasurement(w http.ResponseWriter, request *http.Request)
 
 func (r *Router) measurementAnalysis(w http.ResponseWriter, request *http.Request) {
 	value, err := r.dependencies.AnalyzeMeasuredRun(model.RunID(chi.URLParam(request, "id")))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, value)
+}
+
+func (r *Router) probeBindings(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, r.dependencies.ProbeBindings())
+}
+
+func (r *Router) registerProbeBinding(w http.ResponseWriter, request *http.Request) {
+	var input probe.ChannelBinding
+	if err := decodeMeasurementBody(request, &input); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	value, err := r.dependencies.RegisterProbeBinding(input)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, value)
+}
+
+func (r *Router) measurementPermit(w http.ResponseWriter, request *http.Request) {
+	value, err := r.dependencies.EvaluateMeasuredRun(model.RunID(chi.URLParam(request, "id")))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return

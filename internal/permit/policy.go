@@ -2,6 +2,8 @@ package permit
 
 import (
     "sort"
+    "strconv"
+    "strings"
     "time"
 
     "github.com/wyw14/solo-037/internal/model"
@@ -18,6 +20,10 @@ type Decision struct {
     Run model.RunID `json:"run"`
     Allowed bool `json:"allowed"`
     Requirements []Requirement `json:"requirements"`
+    // Supporting lists the physical probes (per generation) whose evidence
+    // the wave-related requirements were actually computed from, including
+    // which acquisition channels fed each probe.
+    Supporting []probe.PhysicalSource `json:"supporting"`
     EvaluatedAt time.Time `json:"evaluated_at"`
 }
 
@@ -32,10 +38,19 @@ func DefaultPolicy() Policy {
 }
 
 func (p Policy) Evaluate(run model.RunID, samples []model.Evidence, calm bool, brake bool, at time.Time) Decision {
+    return p.EvaluateWithRegistry(run, samples, nil, calm, brake, at)
+}
+
+// EvaluateWithRegistry judges independence by physical probe, not by raw
+// channel ID: channels registered to the same probe collapse into one source,
+// and only samples inside a binding's effective window inherit its identity.
+func (p Policy) EvaluateWithRegistry(run model.RunID, samples []model.Evidence, registry *probe.Registry, calm bool, brake bool, at time.Time) Decision {
     matching := probe.FilterRun(samples, run)
     analysis := probe.Analyze(matching)
+    supporting := probe.AttributeSources(matching, registry)
+    independent := probe.IndependentPhysical(supporting)
     requirements := []Requirement{
-        {Name: "independent_sources", Satisfied: len(analysis.Sources) >= p.MinimumSources, Detail: sourceDetail(analysis.Sources)},
+        {Name: "independent_sources", Satisfied: independent >= p.MinimumSources, Detail: sourceDetail(supporting)},
         {Name: "continuous_window", Satisfied: probe.Continuous(matching, p.MaximumGap), Detail: analysis.Span.String()},
         {Name: "durable_wave_evidence", Satisfied: probe.Durable(matching), Detail: durabilityDetail(matching)},
         {Name: "calm_water", Satisfied: calm && analysis.RMS <= p.MaximumWaveRMS, Detail: waveDetail(analysis.RMS)},
@@ -45,20 +60,21 @@ func (p Policy) Evaluate(run model.RunID, samples []model.Evidence, calm bool, b
     for _, requirement := range requirements {
         allowed = allowed && requirement.Satisfied
     }
-    return Decision{Run: run, Allowed: allowed, Requirements: requirements, EvaluatedAt: at.UTC()}
+    return Decision{Run: run, Allowed: allowed, Requirements: requirements, Supporting: supporting, EvaluatedAt: at.UTC()}
 }
 
-func sourceDetail(sources []string) string {
-    values := append([]string{}, sources...)
-    sort.Strings(values)
-    result := ""
-    for index, value := range values {
-        if index > 0 {
-            result += ","
+func sourceDetail(sources []probe.PhysicalSource) string {
+    parts := make([]string, 0, len(sources))
+    for _, source := range sources {
+        label := source.Physical + "(gen" + strconv.Itoa(source.Generation)
+        if !source.Registered {
+            label += ",unregistered"
         }
-        result += value
+        label += ")<=" + strings.Join(source.Channels, "+")
+        parts = append(parts, label)
     }
-    return result
+    sort.Strings(parts)
+    return strings.Join(parts, "; ")
 }
 
 func durabilityDetail(samples []model.Evidence) string {

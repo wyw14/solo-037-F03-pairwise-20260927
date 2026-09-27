@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/wyw14/solo-037/internal/model"
+	"github.com/wyw14/solo-037/internal/permit"
 	"github.com/wyw14/solo-037/internal/probe"
 )
 
@@ -31,21 +32,26 @@ type MeasurementInput struct {
 }
 
 type MeasurementAnalysis struct {
-	Operation  model.Operation `json:"operation"`
-	Wave       probe.Analysis  `json:"wave"`
-	ForceCount int             `json:"force_count"`
-	ForceMean  float64         `json:"force_mean"`
-	Evaluated  time.Time       `json:"evaluated_at"`
+	Operation  model.Operation       `json:"operation"`
+	Wave       probe.Analysis        `json:"wave"`
+	// PhysicalSources explains which physical probes (per generation) the
+	// wave conclusion rests on, and which acquisition channels fed each one.
+	PhysicalSources []probe.PhysicalSource `json:"physical_sources"`
+	ForceCount int                 `json:"force_count"`
+	ForceMean  float64             `json:"force_mean"`
+	Evaluated  time.Time           `json:"evaluated_at"`
 }
 
 type MeasurementArchive struct {
 	mu   sync.Mutex
 	path string
+	bindingsPath string
+	registry *probe.Registry
 	runs map[model.RunID]MeasuredRun
 }
 
 func OpenMeasurementArchive(directory string) (*MeasurementArchive, error) {
-	a := &MeasurementArchive{runs: make(map[model.RunID]MeasuredRun)}
+	a := &MeasurementArchive{runs: make(map[model.RunID]MeasuredRun), registry: probe.NewRegistry()}
 	if directory == "" {
 		return a, nil
 	}
@@ -53,18 +59,33 @@ func OpenMeasurementArchive(directory string) (*MeasurementArchive, error) {
 		return nil, err
 	}
 	a.path = filepath.Join(directory, "operator-measurements.json")
+	a.bindingsPath = filepath.Join(directory, "probe-bindings.json")
 	data, err := os.ReadFile(a.path)
-	if errors.Is(err, os.ErrNotExist) {
-		return a, nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	if err := json.Unmarshal(data, &a.runs); err != nil {
-		return nil, fmt.Errorf("read measurement archive: %w", err)
+	if err == nil {
+		if err := json.Unmarshal(data, &a.runs); err != nil {
+			return nil, fmt.Errorf("read measurement archive: %w", err)
+		}
+		if a.runs == nil {
+			return nil, errors.New("measurement archive must contain a run map")
+		}
 	}
-	if a.runs == nil {
-		return nil, errors.New("measurement archive must contain a run map")
+	bindings, err := os.ReadFile(a.bindingsPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	if err == nil {
+		var declared []probe.ChannelBinding
+		if err := json.Unmarshal(bindings, &declared); err != nil {
+			return nil, fmt.Errorf("read probe bindings: %w", err)
+		}
+		for _, binding := range declared {
+			if _, err := a.registry.Register(binding); err != nil {
+				return nil, fmt.Errorf("restore probe binding %s: %w", binding.Channel, err)
+			}
+		}
 	}
 	return a, nil
 }
@@ -102,6 +123,58 @@ func (a *MeasurementArchive) commit(next map[model.RunID]MeasuredRun) error {
 	}
 	a.runs = next
 	return nil
+}
+
+func (a *MeasurementArchive) commitBindings(bindings []probe.ChannelBinding) error {
+	if a.bindingsPath != "" {
+		data, err := json.MarshalIndent(bindings, "", "  ")
+		if err != nil {
+			return err
+		}
+		file, err := os.CreateTemp(filepath.Dir(a.bindingsPath), "bindings-*.tmp")
+		if err != nil {
+			return err
+		}
+		name := file.Name()
+		defer os.Remove(name)
+		if _, err = file.Write(data); err == nil {
+			err = file.Sync()
+		}
+		closeErr := file.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if err := os.Rename(name, a.bindingsPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RegisterProbeBinding lets personnel declare that an acquisition channel
+// belongs to a physical probe, at a wiring generation, for an effective
+// window. The binding is persisted so a restarted service keeps the same
+// source judgement.
+func (a *MeasurementArchive) RegisterProbeBinding(binding probe.ChannelBinding) (probe.ChannelBinding, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	registered, err := a.registry.Register(binding)
+	if err != nil {
+		return probe.ChannelBinding{}, err
+	}
+	if err := a.commitBindings(a.registry.Bindings()); err != nil {
+		return probe.ChannelBinding{}, err
+	}
+	return registered, nil
+}
+
+func (a *MeasurementArchive) ProbeBindings() []probe.ChannelBinding {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.registry.Bindings()
 }
 
 func (a *MeasurementArchive) Create(name, modelName, section, carriage string) (MeasuredRun, error) {
@@ -184,10 +257,32 @@ func (a *MeasurementArchive) Analyze(id model.RunID) (MeasurementAnalysis, error
 		}
 	}
 	result.Wave = probe.Analyze(waves)
+	result.PhysicalSources = probe.AttributeSources(waves, a.registry)
 	if result.ForceCount > 0 {
 		result.ForceMean /= float64(result.ForceCount)
 	}
 	return result, nil
+}
+
+// EvaluateMeasuredRun applies the wave permit policy to the archived wave
+// evidence, resolving channels through the probe registry. The archive holds
+// no carriage brake proof, so that requirement is reported unsatisfied rather
+// than silently assumed.
+func (a *MeasurementArchive) EvaluateMeasuredRun(id model.RunID) (permit.Decision, error) {
+	run, exists := a.Get(id)
+	if !exists {
+		return permit.Decision{}, errors.New("run not found")
+	}
+	waves := make([]model.Evidence, 0)
+	for _, evidence := range run.Evidence {
+		if evidence.Kind == model.EvidenceWaveTime {
+			waves = append(waves, evidence)
+		}
+	}
+	policy := permit.DefaultPolicy()
+	analysis := probe.Analyze(waves)
+	calm := analysis.Count > 0 && analysis.RMS <= policy.MaximumWaveRMS
+	return policy.EvaluateWithRegistry(id, waves, a.registry, calm, false, time.Now().UTC()), nil
 }
 
 func (r *Runtime) CreateMeasuredRun(name, modelName, section, carriage string) (MeasuredRun, error) {
@@ -204,4 +299,14 @@ func (r *Runtime) MeasuredRun(id model.RunID) (MeasuredRun, bool) { return r.Mea
 
 func (r *Runtime) AnalyzeMeasuredRun(id model.RunID) (MeasurementAnalysis, error) {
 	return r.Measurements.Analyze(id)
+}
+
+func (r *Runtime) RegisterProbeBinding(binding probe.ChannelBinding) (probe.ChannelBinding, error) {
+	return r.Measurements.RegisterProbeBinding(binding)
+}
+
+func (r *Runtime) ProbeBindings() []probe.ChannelBinding { return r.Measurements.ProbeBindings() }
+
+func (r *Runtime) EvaluateMeasuredRun(id model.RunID) (permit.Decision, error) {
+	return r.Measurements.EvaluateMeasuredRun(id)
 }

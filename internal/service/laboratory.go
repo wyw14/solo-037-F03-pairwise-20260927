@@ -35,6 +35,7 @@ type Laboratory struct {
     Position *carriage.PositionState
     Wave *wave.Controller
     Probes *probe.Collection
+    ProbeRegistry *probe.Registry
     Forces *force.Receiver
     Permits *permit.Evaluator
     PermitCoordinator *permit.Coordinator
@@ -78,6 +79,7 @@ func NewLaboratory(directory string) (*Laboratory, error) {
         Position: carriage.NewPositionState(generation.Revision()),
         Wave: waveController,
         Probes: probe.NewCollection(),
+        ProbeRegistry: probe.NewRegistry(),
         Forces: force.NewReceiver(),
         Permits: evaluator,
         PermitCoordinator: permit.NewCoordinator(evaluator),
@@ -125,9 +127,10 @@ func (l *Laboratory) Exercise(at time.Time) map[string]any {
         _ = l.Store.Append(forceRecord)
     }
     analysis := probe.Analyze(l.Probes.Samples(operation.ID))
+    physicalSources := probe.AttributeSources(l.Probes.Samples(operation.ID), l.ProbeRegistry)
     policy := permit.DefaultPolicy()
-    policyDecision := policy.Evaluate(operation.ID, l.Probes.Samples(operation.ID), true, false, at.Add(4*time.Millisecond))
-    l.Permits.SetSources(operation.ID, len(analysis.Sources))
+    policyDecision := policy.EvaluateWithRegistry(operation.ID, l.Probes.Samples(operation.ID), l.ProbeRegistry, true, false, at.Add(4*time.Millisecond))
+    l.Permits.SetSources(operation.ID, probe.IndependentPhysical(physicalSources))
     l.Permits.SetCalm(operation.ID, analysis.RMS <= 0.03)
     permitResult := l.PermitCoordinator.Update(operation.ID)
     _ = l.Absorber.SwitchMode("active", at.Add(5*time.Millisecond))
@@ -151,6 +154,7 @@ func (l *Laboratory) Exercise(at time.Time) map[string]any {
         "lease": track.LeaseDescription(lease),
         "position": positionWindow,
         "analysis": analysis,
+        "physical_sources": physicalSources,
         "policy": policyDecision,
         "permit": permitResult,
         "missing": permit.Missing(policyDecision),
