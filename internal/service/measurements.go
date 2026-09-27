@@ -31,11 +31,12 @@ type MeasurementInput struct {
 }
 
 type MeasurementAnalysis struct {
-	Operation  model.Operation `json:"operation"`
-	Wave       probe.Analysis  `json:"wave"`
-	ForceCount int             `json:"force_count"`
-	ForceMean  float64         `json:"force_mean"`
-	Evaluated  time.Time       `json:"evaluated_at"`
+	Operation  model.Operation       `json:"operation"`
+	Wave       probe.Analysis        `json:"wave"`
+	Physical   probe.PhysicalAnalysis `json:"physical"`
+	ForceCount int                   `json:"force_count"`
+	ForceMean  float64               `json:"force_mean"`
+	Evaluated  time.Time             `json:"evaluated_at"`
 }
 
 type MeasurementArchive struct {
@@ -168,7 +169,12 @@ func (a *MeasurementArchive) List() []MeasuredRun {
 	return result
 }
 
-func (a *MeasurementArchive) Analyze(id model.RunID) (MeasurementAnalysis, error) {
+// Analyze computes the quality conclusion for a run. Wave statistics are
+// physical-source aware: registry resolves each channel to the probe
+// generation that was valid when the sample was recorded, so a probe that
+// changed interface is one source, and channels outside every registered
+// window are reported as unresolved instead of inflating independence.
+func (a *MeasurementArchive) Analyze(id model.RunID, registry *probe.Registry) (MeasurementAnalysis, error) {
 	run, exists := a.Get(id)
 	if !exists {
 		return MeasurementAnalysis{}, errors.New("run not found")
@@ -184,6 +190,7 @@ func (a *MeasurementArchive) Analyze(id model.RunID) (MeasurementAnalysis, error
 		}
 	}
 	result.Wave = probe.Analyze(waves)
+	result.Physical = probe.ResolvePhysical(waves, registry)
 	if result.ForceCount > 0 {
 		result.ForceMean /= float64(result.ForceCount)
 	}
@@ -203,5 +210,11 @@ func (r *Runtime) MeasuredRuns() []MeasuredRun { return r.Measurements.List() }
 func (r *Runtime) MeasuredRun(id model.RunID) (MeasuredRun, bool) { return r.Measurements.Get(id) }
 
 func (r *Runtime) AnalyzeMeasuredRun(id model.RunID) (MeasurementAnalysis, error) {
-	return r.Measurements.Analyze(id)
+	return r.Measurements.Analyze(id, r.Bindings.Registry())
 }
+
+func (r *Runtime) RegisterProbeBinding(input BindingInput) (probe.ChannelBinding, error) {
+	return r.Bindings.Register(input)
+}
+
+func (r *Runtime) ProbeBindings() []probe.ChannelBinding { return r.Bindings.List() }

@@ -32,7 +32,7 @@ func TestOperatorMeasurementsPersistAndAnalyzeSuppliedValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	analysis, err := loaded.Analyze(run.Operation.ID)
+	analysis, err := loaded.Analyze(run.Operation.ID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

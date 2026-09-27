@@ -45,6 +45,15 @@ func (c *Collection) IndependentSources(run model.RunID) int {
     return len(c.sources[run])
 }
 
+// IndependentPhysicalSources counts distinct physical probes behind the
+// run's evidence, resolving channels through the registry. Channels without
+// a covering binding do not contribute.
+func (c *Collection) IndependentPhysicalSources(run model.RunID, registry *Registry) int {
+    c.mu.Lock()
+    defer c.mu.Unlock()
+    return len(ResolvePhysical(c.samples[run], registry).Probes)
+}
+
 func (c *Collection) Samples(run model.RunID) []model.Evidence {
     c.mu.Lock()
     defer c.mu.Unlock()

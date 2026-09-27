@@ -25,3 +25,9 @@ func (c *Coordinator) Record(run model.RunID, revision model.RevisionID, source 
 func (c *Coordinator) IsCalm() bool { return c.Window.Valid() }
 
 func (c *Coordinator) Sources(run model.RunID) int { return c.Collection.IndependentSources(run) }
+
+// PhysicalSources counts independent physical probes for the run once
+// channels are resolved through the registry.
+func (c *Coordinator) PhysicalSources(run model.RunID, registry *Registry) int {
+    return c.Collection.IndependentPhysicalSources(run, registry)
+}

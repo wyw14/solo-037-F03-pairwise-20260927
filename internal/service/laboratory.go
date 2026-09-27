@@ -35,6 +35,7 @@ type Laboratory struct {
     Position *carriage.PositionState
     Wave *wave.Controller
     Probes *probe.Collection
+    Bindings *probe.Registry
     Forces *force.Receiver
     Permits *permit.Evaluator
     PermitCoordinator *permit.Coordinator
@@ -78,6 +79,7 @@ func NewLaboratory(directory string) (*Laboratory, error) {
         Position: carriage.NewPositionState(generation.Revision()),
         Wave: waveController,
         Probes: probe.NewCollection(),
+        Bindings: probe.NewRegistry(),
         Forces: force.NewReceiver(),
         Permits: evaluator,
         PermitCoordinator: permit.NewCoordinator(evaluator),
@@ -109,6 +111,10 @@ func (l *Laboratory) Exercise(at time.Time) map[string]any {
     positionWindow := l.Position.Observe(10)
     profile := wave.NewProfile(0.8, 0.01, 30*time.Millisecond)
     profileEvidence := wave.ProfileEvidence(operation.ID, operation.Revision, profile, at.Add(2*time.Millisecond))
+    for index, channel := range []string{"probe-a", "probe-b"} {
+        probeID := []string{"wave-probe-port", "wave-probe-starboard"}[index]
+        _, _ = l.Bindings.Register(channel, probeID, "laboratory", at.Add(-time.Minute), time.Time{}, at)
+    }
     for index, evidence := range profileEvidence {
         evidence.SourceID = "probe-" + string(rune('a'+index%2))
         evidence.Durable = true
@@ -125,9 +131,10 @@ func (l *Laboratory) Exercise(at time.Time) map[string]any {
         _ = l.Store.Append(forceRecord)
     }
     analysis := probe.Analyze(l.Probes.Samples(operation.ID))
+    physical := probe.ResolvePhysical(l.Probes.Samples(operation.ID), l.Bindings)
     policy := permit.DefaultPolicy()
-    policyDecision := policy.Evaluate(operation.ID, l.Probes.Samples(operation.ID), true, false, at.Add(4*time.Millisecond))
-    l.Permits.SetSources(operation.ID, len(analysis.Sources))
+    policyDecision := policy.EvaluateWithRegistry(operation.ID, l.Probes.Samples(operation.ID), l.Bindings, true, false, at.Add(4*time.Millisecond))
+    l.Permits.SetSources(operation.ID, len(physical.Probes))
     l.Permits.SetCalm(operation.ID, analysis.RMS <= 0.03)
     permitResult := l.PermitCoordinator.Update(operation.ID)
     _ = l.Absorber.SwitchMode("active", at.Add(5*time.Millisecond))
@@ -151,6 +158,7 @@ func (l *Laboratory) Exercise(at time.Time) map[string]any {
         "lease": track.LeaseDescription(lease),
         "position": positionWindow,
         "analysis": analysis,
+        "physical": physical,
         "policy": policyDecision,
         "permit": permitResult,
         "missing": permit.Missing(policyDecision),
